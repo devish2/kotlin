@@ -69,7 +69,7 @@ fun generateKotlinGradleOptions(withPrinterToFile: (targetFile: File, Printer.()
     // generate jvm interface
     val jvmInterfaceFqName = FqName("org.jetbrains.kotlin.gradle.dsl.KotlinJvmOptions")
     val jvmOptions = gradleOptions<K2JVMCompilerArguments>()
-    withPrinterToFile(File(srcDir, jvmInterfaceFqName)) {
+    withPrinterToFile(File(apiSrcDir, jvmInterfaceFqName)) {
         generateInterface(jvmInterfaceFqName,
                           jvmOptions,
                           parentType = commonCompilerInterfaceFqName)

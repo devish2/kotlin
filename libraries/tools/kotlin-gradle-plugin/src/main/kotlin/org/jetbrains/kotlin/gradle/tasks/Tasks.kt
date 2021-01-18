@@ -168,7 +168,7 @@ abstract class GradleCompileTaskProvider @Inject constructor(
 }
 
 abstract class AbstractKotlinCompile<T : CommonCompilerArguments> : AbstractKotlinCompileTool<T>(),
-    CompileUsingKotlinDaemonWithNormalization {
+    CompileUsingKotlinDaemonWithNormalization, KotlinCompileApi {
 
     open class Configurator<T : AbstractKotlinCompile<*>>(protected val compilation: KotlinCompilationData<*>) : TaskConfigurator<T> {
         override fun configure(task: T) {
@@ -182,13 +182,7 @@ abstract class AbstractKotlinCompile<T : CommonCompilerArguments> : AbstractKotl
             }
             task.moduleName.set(project.provider { compilation.moduleName })
             task.sourceSetName.set(project.provider { compilation.compilationPurpose })
-            task.coroutines.value(
-                project.provider {
-                    project.extensions.findByType(KotlinTopLevelExtension::class.java)!!.experimental.coroutines
-                        ?: PropertiesProvider(project).coroutines
-                        ?: Coroutines.DEFAULT
-                }
-            ).disallowChanges()
+            task.applyFrom(project.extensions.findByType(KotlinTopLevelExtension::class.java)!!)
             task.multiPlatformEnabled.value(
                 project.provider {
                     project.plugins.any { it is KotlinPlatformPluginBase || it is KotlinMultiplatformPluginWrapper || it is KotlinPm20PluginWrapper }
@@ -207,6 +201,16 @@ abstract class AbstractKotlinCompile<T : CommonCompilerArguments> : AbstractKotl
             task.project.layout.buildDirectory.dir("$KOTLIN_BUILD_DIR_NAME/classpath-snapshot/${task.name}")
     }
 
+    protected fun applyFrom(topLeveExtension: KotlinTopLevelExtension) {
+        coroutines.value(
+            project.provider {
+                topLeveExtension.experimental.coroutines
+                    ?: PropertiesProvider(project).coroutines
+                    ?: Coroutines.DEFAULT
+            }
+        ).disallowChanges()
+    }
+
     init {
         cacheOnlyIfEnabledForKotlin()
     }
@@ -215,10 +219,6 @@ abstract class AbstractKotlinCompile<T : CommonCompilerArguments> : AbstractKotl
 
     @get:Internal
     protected val objects: ObjectFactory = project.objects
-
-    // avoid creating directory in getter: this can lead to failure in parallel build
-    @get:LocalState
-    internal val taskBuildDirectory: DirectoryProperty = objects.directoryProperty()
 
     @get:Internal
     internal val buildHistoryFile
@@ -243,14 +243,11 @@ abstract class AbstractKotlinCompile<T : CommonCompilerArguments> : AbstractKotl
     internal var reportingSettings = ReportingSettings()
 
     @get:Input
-    internal val useModuleDetection: Property<Boolean> = objects.property(Boolean::class.java).value(false)
+    override val useModuleDetection: Property<Boolean> = objects.property(Boolean::class.java).value(false)
 
     @get:Internal
     protected val multiModuleICSettings: MultiModuleICSettings
         get() = MultiModuleICSettings(buildHistoryFile.get().asFile, useModuleDetection.get())
-
-    @get:Classpath
-    open val pluginClasspath: ConfigurableFileCollection = objects.fileCollection()
 
     @get:Internal
     internal val pluginOptions = CompilerPluginOptions()
@@ -273,17 +270,11 @@ abstract class AbstractKotlinCompile<T : CommonCompilerArguments> : AbstractKotl
     @get:Internal
     internal val javaOutputDir: DirectoryProperty = objects.directoryProperty()
 
-    @get:Internal
-    internal val sourceSetName: Property<String> = objects.property(String::class.java)
-
     @get:InputFiles
     @get:IgnoreEmptyDirectories
     @get:Incremental
     @get:PathSensitive(PathSensitivity.RELATIVE)
     internal val commonSourceSet: ConfigurableFileCollection = objects.fileCollection()
-
-    @get:Input
-    internal val moduleName: Property<String> = objects.property(String::class.java)
 
     @get:Internal
     val abiSnapshotFile
@@ -299,11 +290,11 @@ abstract class AbstractKotlinCompile<T : CommonCompilerArguments> : AbstractKotl
     internal val friendSourceSets = objects.listProperty(String::class.java)
 
     @get:Internal // takes part in the compiler arguments
-    val friendPaths: ConfigurableFileCollection = objects.fileCollection()
+    override val friendPaths: ConfigurableFileCollection = objects.fileCollection()
+
+    override val outputDirectory: DirectoryProperty = destinationDirectory
 
     private val kotlinLogger by lazy { GradleKotlinLogger(logger) }
-
-    abstract override val kotlinDaemonJvmArguments: ListProperty<String>
 
     @get:Internal
     protected val gradleCompileTaskProvider: Provider<GradleCompileTaskProvider> = objects
@@ -385,7 +376,7 @@ abstract class AbstractKotlinCompile<T : CommonCompilerArguments> : AbstractKotl
         val sourceRoots = getSourceRoots()
         val allKotlinSources = sourceRoots.kotlinSourceFiles
 
-        logger.kotlinDebug { "All kotlin sources: ${allKotlinSources.pathsAsStringRelativeTo(projectDir)}" }
+        logger.kotlinDebug { "All kotlin sources: ${allKotlinSources.pathsAsStringRelativeTo(gradleCompileTaskProvider.get().projectDir.get())}" }
 
         if (!inputChanges.isIncremental && skipCondition()) {
             // Skip running only if non-incremental run. Otherwise, we may need to do some cleanup.
@@ -434,9 +425,6 @@ abstract class AbstractKotlinCompile<T : CommonCompilerArguments> : AbstractKotl
      */
     internal abstract fun callCompilerAsync(args: T, sourceRoots: SourceRoots, changedFiles: ChangedFiles)
 
-    @get:Input
-    internal val multiPlatformEnabled: Property<Boolean> = objects.property(Boolean::class.java)
-
     @get:Internal
     internal val abstractKotlinCompileArgumentsContributor by lazy {
         AbstractKotlinCompileArgumentsContributor(
@@ -452,25 +440,66 @@ abstract class AbstractKotlinCompile<T : CommonCompilerArguments> : AbstractKotl
     }
 }
 
-open class KotlinCompileArgumentsProvider<T : AbstractKotlinCompile<out CommonCompilerArguments>>(taskProvider: T) {
+open class KotlinCompileArgumentsProvider<T : AbstractKotlinCompile<out CommonCompilerArguments>> internal constructor(
+    val coroutines: Provider<Coroutines>,
+    val logger: Logger,
+    val isMultiplatform: Boolean,
+    private val pluginData: KotlinCompilerPluginData?,
+    val pluginClasspath: FileCollection,
+    val pluginOptions: CompilerPluginOptions
+) {
 
-    val coroutines: Provider<Coroutines> = taskProvider.coroutines
-    val logger: Logger = taskProvider.logger
-    val isMultiplatform: Boolean = taskProvider.multiPlatformEnabled.get()
-    private val pluginData = taskProvider.kotlinPluginData?.orNull
-    val pluginClasspath: FileCollection = listOfNotNull(taskProvider.pluginClasspath, pluginData?.classpath).reduce(FileCollection::plus)
-    val pluginOptions: CompilerPluginOptions = listOfNotNull(taskProvider.pluginOptions, pluginData?.options).reduce(CompilerPluginOptions::plus)
+    constructor(taskProvider: T) : this(
+        coroutines = taskProvider.coroutines,
+        logger = taskProvider.logger,
+        isMultiplatform = taskProvider.multiPlatformEnabled.get(),
+        pluginData = taskProvider.kotlinPluginData?.orNull,
+        pluginClasspath = listOfNotNull(
+            taskProvider.pluginClasspath,
+            taskProvider.kotlinPluginData?.orNull?.classpath
+        ).reduce(FileCollection::plus),
+        pluginOptions = listOfNotNull(taskProvider.pluginOptions, taskProvider.kotlinPluginData?.orNull?.options).reduce(
+            CompilerPluginOptions::plus
+        )
+    )
 }
 
-class KotlinJvmCompilerArgumentsProvider
-    (taskProvider: KotlinCompile) : KotlinCompileArgumentsProvider<KotlinCompile>(taskProvider) {
-    val moduleName: String = taskProvider.moduleName.get()
-    val friendPaths: FileCollection = taskProvider.friendPaths
-    val compileClasspath: Iterable<File> = taskProvider.classpath
-    val destinationDir: File = taskProvider.destinationDir
-    internal val kotlinOptions: List<KotlinJvmOptionsImpl> = listOfNotNull(
-        taskProvider.parentKotlinOptionsImpl.orNull as? KotlinJvmOptionsImpl,
-        taskProvider.kotlinOptions as KotlinJvmOptionsImpl
+class KotlinJvmCompilerArgumentsProvider internal constructor(
+    val moduleName: String,
+    val friendPaths: FileCollection,
+    val compileClasspath: Iterable<File>,
+    val destinationDir: File,
+    internal val kotlinOptions: List<KotlinJvmOptionsImpl>,
+    coroutines: Provider<Coroutines>,
+    logger: Logger,
+    isMultiplatform: Boolean,
+    pluginData: KotlinCompilerPluginData?,
+    pluginClasspath: FileCollection,
+    pluginOptions: CompilerPluginOptions,
+) : KotlinCompileArgumentsProvider<KotlinCompile>(
+    coroutines, logger, isMultiplatform, pluginData, pluginClasspath, pluginOptions,
+) {
+
+    constructor(taskProvider: KotlinCompile) : this(
+        moduleName = taskProvider.moduleName.get(),
+        friendPaths = taskProvider.friendPaths,
+        compileClasspath = taskProvider.classpath,
+        destinationDir = taskProvider.destinationDir,
+        kotlinOptions = listOfNotNull(
+            taskProvider.parentKotlinOptions.orNull as? KotlinJvmOptionsImpl,
+            taskProvider.kotlinOptions as KotlinJvmOptionsImpl
+        ),
+        coroutines = taskProvider.coroutines,
+        logger = taskProvider.logger,
+        isMultiplatform = taskProvider.multiPlatformEnabled.get(),
+        pluginData = taskProvider.kotlinPluginData?.orNull,
+        pluginClasspath = listOfNotNull(
+            taskProvider.pluginClasspath,
+            taskProvider.kotlinPluginData?.orNull?.classpath
+        ).reduce(FileCollection::plus),
+        pluginOptions = listOfNotNull(taskProvider.pluginOptions, taskProvider.kotlinPluginData?.orNull?.options).reduce(
+            CompilerPluginOptions::plus
+        )
     )
 }
 
@@ -482,7 +511,8 @@ abstract class KotlinCompile @Inject constructor(
     override val kotlinOptions: KotlinJvmOptions
 ) : AbstractKotlinCompile<K2JVMCompilerArguments>(),
     KotlinJvmCompile,
-    UsesKotlinJavaToolchain {
+    UsesKotlinJavaToolchain,
+    KotlinJvmCompileApi{
 
     internal open class Configurator<T : KotlinCompile>(
         kotlinCompilation: KotlinCompilationData<*>,
@@ -561,8 +591,13 @@ abstract class KotlinCompile @Inject constructor(
         }
     }
 
-    @get:Internal
-    internal val parentKotlinOptionsImpl: Property<KotlinJvmOptions> = objects.property(KotlinJvmOptions::class.java)
+    override fun applyFrom(ext: KotlinTopLevelExtensionConfig) {
+        val propertiesProvider = PropertiesProvider(project)
+        coroutines.value(project.provider {
+            ext.experimental.coroutines ?: propertiesProvider.coroutines ?: Coroutines.DEFAULT
+        }).disallowChanges()
+        propertiesProvider.mapKotlinTaskProperties(this)
+    }
 
     @get:Internal
     @field:Transient

@@ -26,14 +26,13 @@ import org.jetbrains.kotlin.gradle.tasks.withType
 import org.jetbrains.kotlin.gradle.utils.lowerCamelCaseName
 import org.jetbrains.kotlin.konan.target.CompilerOutputKind
 import org.jetbrains.kotlin.statistics.metrics.StringMetrics
+import javax.inject.Inject
 import kotlin.reflect.KClass
 
 private const val KOTLIN_PROJECT_EXTENSION_NAME = "kotlin"
 
 internal fun Project.createKotlinExtension(extensionClass: KClass<out KotlinTopLevelExtension>): KotlinTopLevelExtension {
-    val kotlinExt = extensions.create(KOTLIN_PROJECT_EXTENSION_NAME, extensionClass.java, this)
-    DslObject(kotlinExt).extensions.create("experimental", ExperimentalExtension::class.java)
-    return topLevelExtension
+    return extensions.create(KOTLIN_PROJECT_EXTENSION_NAME, extensionClass.java, this)
 }
 
 internal val Project.topLevelExtension: KotlinTopLevelExtension
@@ -57,11 +56,15 @@ internal val Project.multiplatformExtension: KotlinMultiplatformExtension
 internal val Project.pm20Extension: KotlinPm20ProjectExtension
     get() = extensions.getByName(KOTLIN_PROJECT_EXTENSION_NAME) as KotlinPm20ProjectExtension
 
-open class KotlinTopLevelExtension (internal val project: Project) {
-    val experimental: ExperimentalExtension
-        get() = DslObject(this).extensions.getByType(ExperimentalExtension::class.java)
+abstract class KotlinTopLevelExtension(internal val project: Project): KotlinTopLevelExtensionConfig {
 
-    lateinit var coreLibrariesVersion: String
+    override val experimental: ExperimentalExtension = project.objects.newInstance(ExperimentalExtension::class.java)
+
+    fun experimental(action: ExperimentalExtension.() -> Unit) {
+        this.experimental.action()
+    }
+
+    override lateinit var coreLibrariesVersion: String
 
     private val toolchainSupport = ToolchainSupport.createToolchain(project)
 
@@ -92,18 +95,18 @@ open class KotlinTopLevelExtension (internal val project: Project) {
                 }
         }
 
-    var explicitApi: ExplicitApiMode? = null
+    override var explicitApi: ExplicitApiMode? = null
 
-    fun explicitApi() {
+    override fun explicitApi() {
         explicitApi = ExplicitApiMode.Strict
     }
 
-    fun explicitApiWarning() {
+    override fun explicitApiWarning() {
         explicitApi = ExplicitApiMode.Warning
     }
 }
 
-open class KotlinProjectExtension(project: Project) : KotlinTopLevelExtension(project), KotlinSourceSetContainer {
+open class KotlinProjectExtension @Inject constructor(project: Project): KotlinTopLevelExtension(project), KotlinSourceSetContainer {
     override var sourceSets: NamedDomainObjectContainer<KotlinSourceSet>
         @Suppress("UNCHECKED_CAST")
         get() = DslObject(this).extensions.getByName("sourceSets") as NamedDomainObjectContainer<KotlinSourceSet>
@@ -118,18 +121,18 @@ abstract class KotlinSingleTargetExtension(project: Project) : KotlinProjectExte
     open fun target(body: Closure<out KotlinTarget>) = ConfigureUtil.configure(body, target)
 }
 
-abstract class KotlinSingleJavaTargetExtension(project: Project) : KotlinSingleTargetExtension(project) {
+abstract class KotlinSingleJavaTargetExtension(project: Project): KotlinSingleTargetExtension(project) {
     abstract override val target: KotlinWithJavaTarget<*>
 }
 
-open class KotlinJvmProjectExtension(project: Project) : KotlinSingleJavaTargetExtension(project) {
+open class KotlinJvmProjectExtension(project: Project): KotlinSingleJavaTargetExtension(project) {
     override lateinit var target: KotlinWithJavaTarget<KotlinJvmOptions>
         internal set
 
     open fun target(body: KotlinWithJavaTarget<KotlinJvmOptions>.() -> Unit) = target.run(body)
 }
 
-open class Kotlin2JsProjectExtension(project: Project) : KotlinSingleJavaTargetExtension(project) {
+open class Kotlin2JsProjectExtension (project: Project): KotlinSingleJavaTargetExtension(project) {
     override lateinit var target: KotlinWithJavaTarget<KotlinJsOptions>
         internal set
 
@@ -272,34 +275,22 @@ open class KotlinJsProjectExtension(project: Project) :
         }
 }
 
-open class KotlinCommonProjectExtension(project: Project) : KotlinSingleJavaTargetExtension(project) {
+open class KotlinCommonProjectExtension(project: Project): KotlinSingleJavaTargetExtension(project) {
     override lateinit var target: KotlinWithJavaTarget<KotlinMultiplatformCommonOptions>
         internal set
 
     open fun target(body: KotlinWithJavaTarget<KotlinMultiplatformCommonOptions>.() -> Unit) = target.run(body)
 }
 
-open class KotlinAndroidProjectExtension(project: Project) : KotlinSingleTargetExtension(project) {
+open class KotlinAndroidProjectExtension(project: Project): KotlinSingleTargetExtension(project) {
     override lateinit var target: KotlinAndroidTarget
         internal set
 
     open fun target(body: KotlinAndroidTarget.() -> Unit) = target.run(body)
 }
 
-open class ExperimentalExtension {
-    var coroutines: Coroutines? = null
-}
-
-enum class Coroutines {
-    ENABLE,
-    WARN,
-    ERROR,
-    DEFAULT;
-
-    companion object {
-        fun byCompilerArgument(argument: String): Coroutines? =
-            Coroutines.values().firstOrNull { it.name.equals(argument, ignoreCase = true) }
-    }
+open class ExperimentalExtension: ExperimentalExtensionConfig {
+    override var coroutines: Coroutines? = null
 }
 
 enum class NativeCacheKind(val produce: String?, val outputKind: CompilerOutputKind?) {
@@ -311,12 +302,4 @@ enum class NativeCacheKind(val produce: String?, val outputKind: CompilerOutputK
         fun byCompilerArgument(argument: String): NativeCacheKind? =
             NativeCacheKind.values().firstOrNull { it.name.equals(argument, ignoreCase = true) }
     }
-}
-
-enum class ExplicitApiMode(private val cliOption: String) {
-    Strict("strict"),
-    Warning("warning"),
-    Disabled("disabled");
-
-    fun toCompilerArg() = "-Xexplicit-api=$cliOption"
 }

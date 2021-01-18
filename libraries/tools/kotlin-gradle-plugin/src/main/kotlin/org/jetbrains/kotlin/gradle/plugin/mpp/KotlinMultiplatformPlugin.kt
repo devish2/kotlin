@@ -71,6 +71,8 @@ class KotlinMultiplatformPlugin : Plugin<Project> {
 
         project.plugins.apply(JavaBasePlugin::class.java)
 
+        // TODO: When android plugin is applied, disable AGP built-in Kotlin support
+
         val targetsContainer = project.container(KotlinTarget::class.java)
         val kotlinMultiplatformExtension = project.extensions.getByType(KotlinMultiplatformExtension::class.java)
         val targetsFromPreset = TargetFromPresetExtension(kotlinMultiplatformExtension)

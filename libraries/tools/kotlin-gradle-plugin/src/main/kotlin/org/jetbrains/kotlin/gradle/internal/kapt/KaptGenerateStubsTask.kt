@@ -18,14 +18,18 @@ package org.jetbrains.kotlin.gradle.internal
 
 import org.gradle.api.file.ConfigurableFileCollection
 import org.gradle.api.file.Directory
-import org.gradle.api.file.DirectoryProperty
-import org.gradle.api.provider.Property
 import org.gradle.api.provider.Provider
 import org.gradle.api.tasks.*
 import org.jetbrains.kotlin.cli.common.arguments.K2JVMCompilerArguments
+import org.jetbrains.kotlin.gradle.dsl.KaptExtensionApi
 import org.jetbrains.kotlin.gradle.dsl.KotlinJvmOptionsImpl
+import org.jetbrains.kotlin.gradle.internal.Kapt3GradleSubplugin.Companion.isInfoAsWarnings
+import org.jetbrains.kotlin.gradle.internal.Kapt3GradleSubplugin.Companion.isKaptKeepKdocCommentsInStubs
+import org.jetbrains.kotlin.gradle.internal.Kapt3GradleSubplugin.Companion.isKaptVerbose
+import org.jetbrains.kotlin.gradle.plugin.*
 import org.jetbrains.kotlin.gradle.plugin.PropertiesProvider
 import org.jetbrains.kotlin.gradle.plugin.mpp.pm20.KotlinCompilationData
+import org.jetbrains.kotlin.gradle.plugin.registerSubpluginOptionsAsInputs
 import org.jetbrains.kotlin.gradle.tasks.*
 import org.jetbrains.kotlin.gradle.tasks.FilteringSourceRootsContainer
 import org.jetbrains.kotlin.gradle.tasks.SourceRoots
@@ -36,7 +40,7 @@ import java.io.File
 import java.util.concurrent.Callable
 
 @CacheableTask
-abstract class KaptGenerateStubsTask : KotlinCompile(KotlinJvmOptionsImpl()) {
+abstract class KaptGenerateStubsTask : KotlinCompile(KotlinJvmOptionsImpl()), KaptGenerateStubsTaskApi {
 
     internal class Configurator(
         private val kotlinCompileTaskProvider: TaskProvider<KotlinCompile>,
@@ -56,21 +60,19 @@ abstract class KaptGenerateStubsTask : KotlinCompile(KotlinJvmOptionsImpl()) {
             task.useModuleDetection.value(kotlinCompileTask.useModuleDetection).disallowChanges()
             task.moduleName.value(kotlinCompileTask.moduleName).disallowChanges()
             task.classpath = task.project.files(Callable { kotlinCompileTask.classpath })
-            task.kotlinTaskPluginClasspath.from(
-                providerFactory.provider { kotlinCompileTask.pluginClasspath }
-            )
-            task.compileKotlinArgumentsContributor.set(
-                providerFactory.provider {
-                    kotlinCompileTask.compilerArgumentsContributor
-                }
-            )
-            task.jvmSourceRoots.set(
+            task.pluginClasspath.from(providerFactory.provider { kotlinCompileTask.pluginClasspath })
+//            task.compileKotlinArgumentsContributor.set(
+//                providerFactory.provider {
+//                    kotlinCompileTask.compilerArgumentsContributor
+//                }
+//            )
+            task.source(providerFactory.provider {
+                kotlinCompileTask.getSourceRoots().kotlinSourceFiles.filter { task.isSourceRootAllowed(it) }
+            })
+            task.javaSourceRoots.from(
                 providerFactory.provider {
                     kotlinCompileTask.getSourceRoots().let { compileTaskSourceRoots ->
-                        SourceRoots.ForJvm(
-                            compileTaskSourceRoots.kotlinSourceFiles.filter { task.isSourceRootAllowed(it) },
-                            compileTaskSourceRoots.javaSourceRoots.filter { task.isSourceRootAllowed(it) }
-                        )
+                        compileTaskSourceRoots.javaSourceRoots.filter { task.isSourceRootAllowed(it) }
                     }
                 }
             )
@@ -78,14 +80,79 @@ abstract class KaptGenerateStubsTask : KotlinCompile(KotlinJvmOptionsImpl()) {
         }
     }
 
+    override fun applyFrom(ext: KaptExtensionApi) {
+        val dslJavacOptions: Provider<Map<String, String>> = project.provider { ext.getJavacOptions() }
+
+        val subpluginOptions = buildOptions("apt", dslJavacOptions, ext)
+        registerSubpluginOptions(subpluginOptions)
+    }
+
+    private fun buildOptions(
+        aptMode: String,
+        javacOptions: Provider<Map<String, String>>,
+        kaptExtension: KaptExtensionApi
+    ): Provider<List<SubpluginOption>> {
+        return project.provider {
+            val pluginOptions = mutableListOf<SubpluginOption>()
+
+            val generatedFilesDir = Kapt3GradleSubplugin.getKaptGeneratedSourcesDir(project, sourceSetName.get())
+
+            pluginOptions += SubpluginOption("aptMode", aptMode)
+
+            pluginOptions += FilesSubpluginOption("sources", listOf(generatedFilesDir))
+            pluginOptions += FilesSubpluginOption("classes", listOf(Kapt3GradleSubplugin.getKaptGeneratedClassesDir(project, sourceSetName.get())))
+
+            pluginOptions += FilesSubpluginOption("incrementalData", listOf(destinationDirectory.locationOnly.get().asFile))
+
+            val annotationProcessors = kaptExtension.getExplicitAnnotationProcessors()
+            if (annotationProcessors.isNotEmpty()) {
+                pluginOptions += SubpluginOption("processors", annotationProcessors)
+            }
+
+            pluginOptions += SubpluginOption("javacArguments", encodeList(javacOptions.get()))
+
+            addMiscOptions(pluginOptions, kaptExtension)
+
+            pluginOptions
+        }
+    }
+
+    private fun addMiscOptions(pluginOptions: MutableList<SubpluginOption>, kaptExtension: KaptExtensionApi) {
+        // These option names must match those defined in org.jetbrains.kotlin.kapt.cli.KaptCliOption.
+        pluginOptions += SubpluginOption("useLightAnalysis", "${kaptExtension.useLightAnalysis}")
+        pluginOptions += SubpluginOption("correctErrorTypes", "${kaptExtension.correctErrorTypes}")
+        pluginOptions += SubpluginOption("dumpDefaultParameterValues", "${kaptExtension.dumpDefaultParameterValues}")
+        pluginOptions += SubpluginOption("mapDiagnosticLocations", "${kaptExtension.mapDiagnosticLocations}")
+        pluginOptions += SubpluginOption(
+            "strictMode", // Currently doesn't match KaptCliOption.STRICT_MODE_OPTION, is it a typo introduced in https://github.com/JetBrains/kotlin/commit/c83581e6b8155c6d89da977be6e3cd4af30562e5?
+            "${kaptExtension.strictMode}"
+        )
+        pluginOptions += SubpluginOption("stripMetadata", "${kaptExtension.stripMetadata}")
+        pluginOptions += SubpluginOption("keepKdocCommentsInStubs", "${project.isKaptKeepKdocCommentsInStubs()}")
+        pluginOptions += SubpluginOption("showProcessorTimings", "${kaptExtension.showProcessorTimings}")
+        pluginOptions += SubpluginOption("detectMemoryLeaks", kaptExtension.detectMemoryLeaks)
+        pluginOptions += SubpluginOption("infoAsWarnings", "${project.isInfoAsWarnings()}")
+        pluginOptions += FilesSubpluginOption("stubs", listOf(stubsDir.locationOnly.get().asFile))
+
+        if (project.isKaptVerbose()) {
+            pluginOptions += SubpluginOption("verbose", "true")
+        }
+    }
+
+    private fun registerSubpluginOptions(optionsProvider: Provider<List<SubpluginOption>>) {
+        val compilerPluginId = Kapt3GradleSubplugin.KAPT_SUBPLUGIN_ID
+
+        val options = optionsProvider.get()
+
+        registerSubpluginOptionsAsInputs(compilerPluginId, options)
+
+        for (option in options) {
+            pluginOptions.addPluginArgument(compilerPluginId, option)
+        }
+    }
+
     @field:Transient
     override val sourceRootsContainer = FilteringSourceRootsContainer(objects, { isSourceRootAllowed(it) })
-
-    @get:OutputDirectory
-    abstract val stubsDir: DirectoryProperty
-
-    @get:Internal
-    lateinit var generatedSourcesDirs: List<File>
 
     @get:Internal("Not an input, just passed as kapt args. ")
     abstract val kaptClasspath: ConfigurableFileCollection
@@ -93,13 +160,6 @@ abstract class KaptGenerateStubsTask : KotlinCompile(KotlinJvmOptionsImpl()) {
     /* Used as input as empty kapt classpath should not trigger stub generation, but a non-empty one should. */
     @Input
     fun getIfKaptClasspathIsPresent() = !kaptClasspath.isEmpty
-
-    @get:Classpath
-    @Suppress("unused")
-    internal abstract val kotlinTaskPluginClasspath: ConfigurableFileCollection
-
-    @get:Input
-    abstract val verbose: Property<Boolean>
 
     override fun source(vararg sources: Any): SourceTask {
         return super.source(sourceRootsContainer.add(sources))
@@ -112,13 +172,20 @@ abstract class KaptGenerateStubsTask : KotlinCompile(KotlinJvmOptionsImpl()) {
     private fun isSourceRootAllowed(source: File): Boolean =
         !destinationDir.isParentOf(source) &&
                 !stubsDir.asFile.get().isParentOf(source) &&
-                generatedSourcesDirs.none { it.isParentOf(source) }
+                excludedSourceDirs.get().none { it.isParentOf(source) }
 
-    @get:Internal
-    internal abstract val compileKotlinArgumentsContributor: Property<CompilerArgumentsContributor<K2JVMCompilerArguments>>
+//    @get:Internal
+//    internal val compileKotlinArgumentsContributor: Property<CompilerArgumentsContributor<K2JVMCompilerArguments>> =
+//        objects.propertyWithNewInstance<CompilerArgumentsContributor<K2JVMCompilerArguments>>().value(
+//            project.provider {
+//                KotlinJvmCompilerArgumentsProvider(
+//
+//                )
+//            }
+//        )
 
     override fun setupCompilerArgs(args: K2JVMCompilerArguments, defaultsOnly: Boolean, ignoreClasspathResolutionErrors: Boolean) {
-        compileKotlinArgumentsContributor.get().contributeArguments(args, compilerArgumentsConfigurationFlags(
+        compilerArgumentsContributor.contributeArguments(args, compilerArgumentsConfigurationFlags(
             defaultsOnly,
             ignoreClasspathResolutionErrors
         ))
@@ -131,8 +198,7 @@ abstract class KaptGenerateStubsTask : KotlinCompile(KotlinJvmOptionsImpl()) {
         args.destinationAsFile = this.destinationDir
     }
 
-    @get:Internal
-    internal abstract val jvmSourceRoots: Property<SourceRoots.ForJvm>
+    private val jvmSourceRoots by lazy { SourceRoots.ForJvm(this.source, javaSourceRoots) }
 
-    override fun getSourceRoots(): SourceRoots.ForJvm = jvmSourceRoots.get()
+    override fun getSourceRoots(): SourceRoots.ForJvm = jvmSourceRoots
 }

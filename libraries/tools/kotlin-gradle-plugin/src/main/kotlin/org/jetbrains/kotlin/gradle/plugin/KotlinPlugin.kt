@@ -962,7 +962,7 @@ abstract class AbstractAndroidProjectHandler(private val kotlinConfigurationTool
         val kotlinTaskName = compilation.compileKotlinTaskName
 
         tasksProvider.registerKotlinJVMTask(project, kotlinTaskName, compilation) {
-            it.parentKotlinOptionsImpl.set(rootKotlinOptions)
+            it.parentKotlinOptions.set(rootKotlinOptions)
 
             // store kotlin classes in separate directory. They will serve as class-path to java compiler
             it.destinationDirectory.set(project.layout.buildDirectory.dir("tmp/kotlin-classes/$variantDataName"))
@@ -1126,15 +1126,15 @@ internal fun compareVersionNumbers(v1: String?, v2: String?): Int {
     }
 }
 
-internal fun Project.forEachVariant(action: (BaseVariant) -> Unit) {
+fun Project.forEachVariant(action: (BaseVariant) -> Unit) {
     val androidExtension = this.extensions.getByName("android")
     when (androidExtension) {
         is AppExtension -> androidExtension.applicationVariants.all(action)
         is LibraryExtension -> {
             androidExtension.libraryVariants.all(action)
-            if (androidExtension is FeatureExtension) {
-                androidExtension.featureVariants.all(action)
-            }
+//            if (androidExtension is FeatureExtension) {
+//                androidExtension.featureVariants.all(action)
+//            }
         }
         is TestExtension -> androidExtension.applicationVariants.all(action)
     }

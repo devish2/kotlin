@@ -211,6 +211,11 @@ pluginBundle {
         id = "org.jetbrains.kotlin.multiplatform.pm20",
         display = "Kotlin Multiplatform plugin with PM2.0"
     )
+    create(
+        name = "kotlinBasePlugin",
+        id = "org.jetbrains.kotlin.base",
+        display = "Gradle plugin with basic Kotlin support"
+    )
 }
 
 publishPluginMarkers()

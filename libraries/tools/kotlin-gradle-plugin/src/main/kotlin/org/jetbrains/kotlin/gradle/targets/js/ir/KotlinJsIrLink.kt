@@ -64,9 +64,6 @@ abstract class KotlinJsIrLink @Inject constructor(
     @get:Input
     internal val incrementalJsIr: Boolean = PropertiesProvider(project).incrementalJsIr
 
-    // Link tasks are not affected by compiler plugin
-    override val pluginClasspath: ConfigurableFileCollection = project.objects.fileCollection()
-
     @Input
     lateinit var mode: KotlinJsBinaryMode
 

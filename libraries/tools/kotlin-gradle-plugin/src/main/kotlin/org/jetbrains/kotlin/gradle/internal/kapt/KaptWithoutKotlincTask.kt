@@ -5,10 +5,13 @@
 
 package org.jetbrains.kotlin.gradle.internal
 
+import com.intellij.openapi.util.SystemInfo
+import com.intellij.util.lang.JavaVersion
 import org.gradle.api.file.ConfigurableFileCollection
 import org.gradle.api.file.FileCollection
 import org.gradle.api.model.ObjectFactory
 import org.gradle.api.provider.Property
+import org.gradle.api.provider.Provider
 import org.gradle.api.provider.ProviderFactory
 import org.gradle.api.tasks.*
 import org.gradle.api.tasks.incremental.IncrementalTaskInputs
@@ -18,13 +21,21 @@ import org.gradle.workers.IsolationMode
 import org.gradle.workers.WorkAction
 import org.gradle.workers.WorkParameters
 import org.gradle.workers.WorkerExecutor
+import org.jetbrains.kotlin.gradle.dsl.KaptExtensionApi
+import org.jetbrains.kotlin.gradle.dsl.KotlinTopLevelExtensionConfig
 import org.jetbrains.kotlin.gradle.internal.Kapt3GradleSubplugin.Companion.KAPT_WORKER_DEPENDENCIES_CONFIGURATION_NAME
+import org.jetbrains.kotlin.gradle.internal.Kapt3GradleSubplugin.Companion.classLoadersCacheSize
+import org.jetbrains.kotlin.gradle.internal.Kapt3GradleSubplugin.Companion.disableClassloaderCacheForProcessors
 import org.jetbrains.kotlin.gradle.internal.kapt.classloaders.ClassLoadersCache
 import org.jetbrains.kotlin.gradle.internal.kapt.classloaders.rootOrSelf
 import org.jetbrains.kotlin.gradle.internal.kapt.incremental.KaptIncrementalChanges
+import org.jetbrains.kotlin.gradle.plugin.FilesSubpluginOption
 import org.jetbrains.kotlin.gradle.plugin.KotlinAndroidPluginWrapper
 import org.jetbrains.kotlin.gradle.tasks.CompilerPluginOptions
 import org.jetbrains.kotlin.gradle.tasks.KotlinCompile
+import org.jetbrains.kotlin.gradle.plugin.SubpluginOption
+import org.jetbrains.kotlin.gradle.tasks.*
+import org.jetbrains.kotlin.gradle.utils.isConfigurationCacheAvailable
 import org.jetbrains.kotlin.gradle.utils.isGradleVersionAtLeast
 import org.jetbrains.kotlin.utils.PathUtil
 import org.slf4j.LoggerFactory
@@ -38,7 +49,7 @@ abstract class KaptWithoutKotlincTask @Inject constructor(
     objectFactory: ObjectFactory,
     private val providerFactory: ProviderFactory,
     private val workerExecutor: WorkerExecutor
-) : KaptTask(objectFactory) {
+) : KaptTask(objectFactory), KaptKotlinWithoutKotlincTaskApi {
 
     class Configurator(kotlinCompileTask: KotlinCompile): KaptTask.Configurator<KaptWithoutKotlincTask>(kotlinCompileTask) {
         override fun configure(task: KaptWithoutKotlincTask) {
@@ -50,8 +61,26 @@ abstract class KaptWithoutKotlincTask @Inject constructor(
         }
     }
 
-    @get:Classpath
-    abstract val kaptJars: ConfigurableFileCollection
+    override fun applyFrom(kaptExtension: KaptExtensionApi) {
+        mapDiagnosticLocations = kaptExtension.mapDiagnosticLocations
+        annotationProcessorFqNames = kaptExtension.getExplicitAnnotationProcessors().split(',').filter { it.isNotEmpty() }
+        javacOptions =  kaptExtension.getJavacOptions()
+        if (includeCompileClasspath.get() && project.classLoadersCacheSize() > 0) {
+            project.logger.warn(
+                "ClassLoaders cache can't be enabled together with AP discovery in compilation classpath."
+                        + "\nSet 'kapt.includeCompileClasspath = false' to disable discovery"
+            )
+        } else {
+            classLoadersCacheSize = project.classLoadersCacheSize()
+        }
+        disableClassloaderCacheForProcessors = project.disableClassloaderCacheForProcessors()
+
+        // TODO: add annotation processor options
+    }
+
+    override fun applyFrom(ext: KotlinTopLevelExtensionConfig) {
+//        TODO("Not yet implemented")
+    }
 
     @get:Input
     var classLoadersCacheSize: Int = 0
@@ -70,9 +99,6 @@ abstract class KaptWithoutKotlincTask @Inject constructor(
 
     @get:Input
     lateinit var javacOptions: Map<String, String>
-
-    @get:Input
-    internal abstract val addJdkClassesToClasspath: Property<Boolean>
 
     @get:Internal
     internal val projectDir = project.projectDir
@@ -128,8 +154,8 @@ abstract class KaptWithoutKotlincTask @Inject constructor(
             incAptCache.orNull?.asFile,
             classpathChanges.toList(),
 
-            destinationDir,
-            classesDir,
+            destinationDir.get().asFile,
+            classesDir.get().asFile,
             stubsDir.asFile.get(),
 
             kaptClasspath.files.toList(),
