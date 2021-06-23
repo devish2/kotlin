@@ -6,6 +6,6 @@ open class A {
 
 class B : A() {
     fun g() {
-        super?.<!UNRESOLVED_REFERENCE!>f<!>()
+        super<!UNNECESSARY_SAFE_CALL!>?.<!>f()
     }
 }
