@@ -81,11 +81,7 @@ internal fun FirTypeRef.toConeKotlinTypeProbablyFlexible(
 
 internal fun JavaType.toFirJavaTypeRef(session: FirSession, javaTypeParameterStack: JavaTypeParameterStack): FirJavaTypeRef {
     return buildJavaTypeRef {
-        annotationBuilder = {
-            (this@toFirJavaTypeRef as? JavaClassifierType)?.annotations.orEmpty().map {
-                it.toFirAnnotationCall(session, javaTypeParameterStack)
-            }
-        }
+        annotationBuilder = makeAnnotationBuilder(session, javaTypeParameterStack)
         type = this@toFirJavaTypeRef
     }
 }
@@ -105,13 +101,10 @@ private fun JavaType?.toConeKotlinTypeWithoutEnhancement(
     session: FirSession, javaTypeParameterStack: JavaTypeParameterStack,
     mode: FirJavaTypeConversionMode
 ): ConeKotlinType {
-    val attributes = if (this != null && annotations.isNotEmpty()) {
-        ConeAttributes.create(
-            listOf(CustomAnnotationTypeAttribute(annotations.map { it.toFirAnnotationCall(session, javaTypeParameterStack) }))
-        )
-    } else {
+    val attributes = if (this != null && annotations.isNotEmpty())
+        ConeAttributes.create(listOf(CustomAnnotationTypeAttribute(convertAnnotationsToFir(session, javaTypeParameterStack))))
+    else
         ConeAttributes.Empty
-    }
     return when (this) {
         is JavaClassifierType ->
             toConeKotlinTypeWithoutEnhancement(session, javaTypeParameterStack, mode, attributes)
@@ -215,7 +208,7 @@ private fun JavaClassifierType.toConeKotlinTypeForFlexibleBound(
                     defaultArgs
                 } else {
                     val classSymbol = session.symbolProvider.getClassLikeSymbolByFqName(classId) as? FirRegularClassSymbol
-                    classSymbol?.fir?.createRawArguments(session, javaTypeParameterStack, lowerBound != null) ?: defaultArgs
+                    classSymbol?.fir?.createRawArguments(session, lowerBound != null) ?: defaultArgs
                 }
             } else {
                 // TODO: why is this condition needed?
@@ -265,13 +258,10 @@ private fun JavaClassifierType.argumentsMakeSenseOnlyForMutableContainer(
     return mutableLastParameterVariance != Variance.OUT_VARIANCE
 }
 
-private fun FirRegularClass.createRawArguments(
-    session: FirSession, javaTypeParameterStack: JavaTypeParameterStack,
-    forUpperBound: Boolean
-): List<ConeTypeProjection> {
+private fun FirRegularClass.createRawArguments(session: FirSession, forUpperBound: Boolean): List<ConeTypeProjection> {
     val cache = mutableMapOf<FirTypeParameter, ConeKotlinType>()
     return typeParameters.map { typeParameter ->
-        val erased = typeParameter.symbol.fir.eraseToUpperBound(session, javaTypeParameterStack, cache)
+        val erased = typeParameter.symbol.fir.eraseToUpperBound(session, cache)
         when {
             !forUpperBound ->
                 erased // T : String -> String, in T : String -> String, T : Enum<T> -> Enum<*>
@@ -288,21 +278,15 @@ private fun FirRegularClass.createRawArguments(
     }
 }
 
-private fun FirTypeParameter.eraseToUpperBound(
-    session: FirSession, javaTypeParameterStack: JavaTypeParameterStack,
-    cache: MutableMap<FirTypeParameter, ConeKotlinType>
-): ConeKotlinType {
-    return cache.getOrPut(this) {
-        cache[this] = ConeKotlinErrorType(ConeIntermediateDiagnostic("self-recursive type parameter $name")) // mark to avoid loops
-        bounds.first().toConeKotlinTypeProbablyFlexible(session, javaTypeParameterStack)
-            .eraseAsUpperBound(session, javaTypeParameterStack, cache)
+private fun FirTypeParameter.eraseToUpperBound(session: FirSession, cache: MutableMap<FirTypeParameter, ConeKotlinType>): ConeKotlinType =
+    cache.getOrPut(this) {
+        // Mark to avoid loops.
+        cache[this] = ConeKotlinErrorType(ConeIntermediateDiagnostic("self-recursive type parameter $name"))
+        // We can assume that Java type parameter bounds are already converted.
+        bounds.first().coneType.eraseAsUpperBound(session, cache)
     }
-}
 
-private fun ConeKotlinType.eraseAsUpperBound(
-    session: FirSession, javaTypeParameterStack: JavaTypeParameterStack,
-    cache: MutableMap<FirTypeParameter, ConeKotlinType>
-): ConeKotlinType =
+private fun ConeKotlinType.eraseAsUpperBound(session: FirSession, cache: MutableMap<FirTypeParameter, ConeKotlinType>): ConeKotlinType =
     when (this) {
         is ConeClassLikeType ->
             withArguments(typeArguments.map { ConeStarProjection }.toTypedArray())
@@ -310,25 +294,22 @@ private fun ConeKotlinType.eraseAsUpperBound(
             // If one bound is a type parameter, the other is probably the same type parameter,
             // so there is no exponential complexity here due to cache lookups.
             ConeFlexibleType(
-                lowerBound.eraseAsUpperBound(session, javaTypeParameterStack, cache).lowerBoundIfFlexible(),
-                upperBound.eraseAsUpperBound(session, javaTypeParameterStack, cache).upperBoundIfFlexible()
+                lowerBound.eraseAsUpperBound(session, cache).lowerBoundIfFlexible(),
+                upperBound.eraseAsUpperBound(session, cache).upperBoundIfFlexible()
             )
         is ConeTypeParameterType ->
-            lookupTag.typeParameterSymbol.fir.eraseToUpperBound(session, javaTypeParameterStack, cache)
+            lookupTag.typeParameterSymbol.fir.eraseToUpperBound(session, cache)
         is ConeDefinitelyNotNullType ->
-            original.eraseAsUpperBound(session, javaTypeParameterStack, cache)
-                .makeConeTypeDefinitelyNotNullOrNotNull(session.typeContext)
+            original.eraseAsUpperBound(session, cache).makeConeTypeDefinitelyNotNullOrNotNull(session.typeContext)
         else -> error("unexpected Java type parameter upper bound kind: $this")
     }
 
 private fun JavaType?.toConeProjectionWithoutEnhancement(
-    session: FirSession,
-    javaTypeParameterStack: JavaTypeParameterStack,
-    boundTypeParameter: FirTypeParameter?,
-    mode: FirJavaTypeConversionMode
+    session: FirSession, javaTypeParameterStack: JavaTypeParameterStack,
+    boundTypeParameter: FirTypeParameter?, mode: FirJavaTypeConversionMode
 ): ConeTypeProjection {
     // TODO: check this
-    val newMode = mode.takeIf { it == FirJavaTypeConversionMode.SUPERTYPE } ?: FirJavaTypeConversionMode.DEFAULT
+    val newMode = if (mode == FirJavaTypeConversionMode.ANNOTATION_MEMBER) FirJavaTypeConversionMode.DEFAULT else mode
     return when (this) {
         null -> ConeStarProjection
         is JavaWildcardType -> {
