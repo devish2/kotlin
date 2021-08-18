@@ -158,3 +158,4 @@ abstract class ClasspathSnapshotTestCommon {
         override fun changeMethodImplementation() = replace("I'm in a public method", "This method implementation has changed!")
     }
 }
+

@@ -84,6 +84,12 @@ abstract class DifferenceCalculator {
     protected fun calcDifferenceForMembers(oldList: List<MessageLite>, newList: List<MessageLite>): Collection<String> {
         val result = hashSetOf<String>()
 
+//        val oldMapNames = oldList.map { it.name(compareObject.oldNameResolver) }
+//        val newMapNames = oldList.map { it.name(compareObject.newNameResolver) }
+//
+//        val oldMapNames1 = oldList.map { it.name(compareObject.newNameResolver) }
+//        val newMapNames1 = oldList.map { it.name(compareObject.oldNameResolver) }
+
         val oldMap =
             oldList.groupBy {
                 it.getHashCode(

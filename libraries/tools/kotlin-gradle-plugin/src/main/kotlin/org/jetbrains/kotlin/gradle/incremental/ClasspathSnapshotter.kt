@@ -48,17 +48,17 @@ object ClassSnapshotter {
      */
     fun snapshot(classes: List<ClassFileWithContents>): List<ClassSnapshot> {
         // Snapshot Kotlin classes first
-        val kotlinClassSnapshots: Map<ClassFile, KotlinClassSnapshot?> = classes.associate {
-            it.classFile to trySnapshotKotlinClass(it)
+        val kotlinClassSnapshots: Map<ClassFileWithContents, KotlinClassSnapshot?> = classes.associateWith {
+            trySnapshotKotlinClass(it)
         }
 
-        // Snapshot Java classes in one invocation
-        val javaClasses: List<ClassFileWithContents> = classes.filter { kotlinClassSnapshots[it.classFile] == null }
+        // Snapshot the remaining Java classes in one invocation
+        val javaClasses: List<ClassFileWithContents> = classes.filter { kotlinClassSnapshots[it] == null }
         val snapshots: List<JavaClassSnapshot> = snapshotJavaClasses(javaClasses)
-        val javaClassSnapshots: Map<ClassFile, JavaClassSnapshot> = javaClasses.map { it.classFile }.zip(snapshots).toMap()
+        val javaClassSnapshots: Map<ClassFileWithContents, JavaClassSnapshot> = javaClasses.zip(snapshots).toMap()
 
         // Return a snapshot for each class
-        return classes.map { kotlinClassSnapshots[it.classFile] ?: javaClassSnapshots[it.classFile]!! }
+        return classes.map { kotlinClassSnapshots[it] ?: javaClassSnapshots[it]!! }
     }
 
     /** Creates [KotlinClassSnapshot] of the given class, or returns `null` if the class is not a Kotlin class. */
@@ -75,44 +75,53 @@ object ClassSnapshotter {
      * Therefore, outer classes and nested classes must be passed together in one invocation of this method.
      */
     private fun snapshotJavaClasses(classes: List<ClassFileWithContents>): List<JavaClassSnapshot> {
-        val classFiles = classes.map { it.classFile }
-        val classesContents = classes.map { it.contents }
-        val classNames = classesContents.map { JavaClassName.compute(it) }
-        val classIds = computeJavaClassIds(classNames)
+        val contents: List<ByteArray> = classes.map { it.contents }
+        val classNames: List<JavaClassName> = contents.map { JavaClassName.compute(it) }
+        val classContents: Map<JavaClassName, ByteArray> = classNames.zip(contents).toMap()
+
+        // Compute `ClassId`s from `JavaClassName`s.
+        // Note that we don't need to compute ClassId`s for certain classes as they won't be used (see below).
+        val regularClasses = classNames.filterNot { it is LocalClass || (it is NestedNonLocalClass && (it.isAnonymous || it.isSynthetic)) }
+        val classIdsOfRegularClasses: Map<JavaClassName, ClassId> = regularClasses.zip(computeJavaClassIds(regularClasses)).toMap()
 
         // Snapshot special cases first
-        // Map a class index to its snapshot, or `null` if it will be created later
-        val specialCaseSnapshots: Map<Int, JavaClassSnapshot?> = classFiles.indices.associateWith { index ->
-            val className = classNames[index]
-            val classId = classIds[index]
-            if (classId.isLocal) {
-                // A local class can't be referenced from other source files, so any changes in a local class will not cause recompilation
-                // of other source files. Therefore, the snapshot of a local class is empty.
-                // In that regard, a nested class of a local class is also considered local (which matches the definition of
-                // ClassId.isLocal, see ClassId's kdoc). Therefore, we checked `classId.isLocal`, which is a super set of `className is
-                // LocalClass`.
-                EmptyJavaClassSnapshot
-            } else if (className is NestedNonLocalClass && (className.isAnonymous || className.isSynthetic)) {
-                // An anonymous or synthetic class also can't be referenced from other source files, so its snapshot is also empty.
-                EmptyJavaClassSnapshot
-            } else {
-                null
+        val specialCaseSnapshots: Map<JavaClassName, JavaClassSnapshot?> = classNames.associateWith { className ->
+            when (className) {
+                is TopLevelClass -> null // Snapshot later
+                is LocalClass -> {
+                    // A local class can't be referenced from other source files, so any changes in a local class will not cause
+                    // recompilation of other source files. Therefore, the snapshot of a local class is empty.
+                    EmptyJavaClassSnapshot
+                }
+                is NestedNonLocalClass -> {
+                    if (classIdsOfRegularClasses[className]!!.isLocal) {
+                        // A nested class of a local class is also considered local (has ClassId.isLocal == true, see ClassId's kdoc).
+                        // It also can't impact recompilation of other source files.
+                        EmptyJavaClassSnapshot
+                    } else if (className.isAnonymous || className.isSynthetic) {
+                        // Same for anonymous or synthetic classes.
+                        EmptyJavaClassSnapshot
+                    } else {
+                        null // Snapshot later
+                    }
+                }
             }
         }
 
         // Snapshot the remaining classes in one invocation
-        val remainingClassesIndices: List<Int> = classFiles.indices.filter { specialCaseSnapshots[it] == null }
-        val remainingClassIds: List<ClassId> = remainingClassesIndices.map { classIds[it] }
-        val remainingClassesContents: List<ByteArray> = remainingClassesIndices.map { classes[it].contents }
+        val snapshottedClasses = specialCaseSnapshots.filter { it.value != null }.keys
+        val remainingClasses: List<JavaClassName> = classNames.filterNot { it in snapshottedClasses }
+        val remainingClassIds: List<ClassId> = remainingClasses.map { classIdsOfRegularClasses[it]!! }
+        val remainingClassesContents: List<ByteArray> = remainingClasses.map { classContents[it]!! }
 
         val snapshots: List<JavaClassSnapshot> = JavaClassDescriptorCreator.create(remainingClassIds, remainingClassesContents).map {
             RegularJavaClassSnapshot(it.toSerializedJavaClass())
         }
-        val remainingSnapshots: Map<Int, JavaClassSnapshot> /* maps a class index to its snapshot */ =
-            remainingClassesIndices.zip(snapshots).toMap()
+        val remainingSnapshots: Map<JavaClassName, JavaClassSnapshot> /* maps a class index to its snapshot */ =
+            remainingClasses.zip(snapshots).toMap()
 
         // Return a snapshot for each class
-        return classFiles.indices.map { specialCaseSnapshots[it] ?: remainingSnapshots[it]!! }
+        return classNames.map { specialCaseSnapshots[it] ?: remainingSnapshots[it]!! }
     }
 }
 
@@ -120,14 +129,15 @@ object ClassSnapshotter {
 private object DirectoryOrJarContentsReader {
 
     /**
-     * Returns a map from Unix-style relative paths of entries to their contents. The paths are relative to the container (directory or
+     * Returns a map from Unix-style relative paths of entries to their contents. The paths are relative to the given container (directory or
      * jar).
      *
      * The map entries need to satisfy the given filter.
      *
      * The map entries are sorted based on their Unix-style relative paths (to ensure deterministic results across filesystems).
      *
-     * Note: If a jar has duplicate entries, only one of them will be used (there is no guarantee which one will be used).
+     * Note: If a jar has duplicate entries, only one of them will be used (there is no guarantee which one will be used, but it will be
+     * deterministic).
      */
     fun read(
         directoryOrJar: File,
@@ -136,7 +146,11 @@ private object DirectoryOrJarContentsReader {
         return if (directoryOrJar.isDirectory) {
             readDirectory(directoryOrJar, entryFilter)
         } else {
-            check(directoryOrJar.isFile && directoryOrJar.path.endsWith(".jar", ignoreCase = true))
+            check(
+                directoryOrJar.isFile
+                        && (directoryOrJar.path.endsWith(".jar", ignoreCase = true)
+                        || directoryOrJar.path.endsWith(".zip", ignoreCase = true))
+            )
             readJar(directoryOrJar, entryFilter)
         }
     }

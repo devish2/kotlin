@@ -447,7 +447,8 @@ open class KotlinCompileArgumentsProvider<T : AbstractKotlinCompile<out CommonCo
     val isMultiplatform: Boolean = taskProvider.multiPlatformEnabled.get()
     private val pluginData = taskProvider.kotlinPluginData?.orNull
     val pluginClasspath: FileCollection = listOfNotNull(taskProvider.pluginClasspath, pluginData?.classpath).reduce(FileCollection::plus)
-    val pluginOptions: CompilerPluginOptions = listOfNotNull(taskProvider.pluginOptions, pluginData?.options).reduce(CompilerPluginOptions::plus)
+    val pluginOptions: CompilerPluginOptions =
+        listOfNotNull(taskProvider.pluginOptions, pluginData?.options).reduce(CompilerPluginOptions::plus)
 }
 
 class KotlinJvmCompilerArgumentsProvider
@@ -545,6 +546,7 @@ abstract class KotlinCompile @Inject constructor(
                     }.files
                 )
                 task.classpathSnapshotProperties.classpathSnapshotDir.value(getClasspathSnapshotDir(task)).disallowChanges()
+                task.classpathSnapshotProperties.classpathSnapshotDirFileCollection.from(getClasspathSnapshotDir(task))
             }
         }
     }
@@ -592,7 +594,15 @@ abstract class KotlinCompile @Inject constructor(
         @get:OutputDirectory
         @get:Optional // Set if useClasspathSnapshot == true
         abstract val classpathSnapshotDir: DirectoryProperty
+
+        /**
+         * [FileCollection] with a single file which is [classpathSnapshotDir], used when a [FileCollection] is required instead of a
+         * [DirectoryProperty].
+         */
+        @get:Internal // Set if useClasspathSnapshot == true
+        abstract val classpathSnapshotDirFileCollection: ConfigurableFileCollection
     }
+
 
     @get:Internal
     internal val defaultKotlinJavaToolchain: Provider<DefaultKotlinJavaToolchain> = objects
@@ -669,10 +679,13 @@ abstract class KotlinCompile @Inject constructor(
         val icEnv = if (isIncrementalCompilationEnabled()) {
             val classpathChanges = when {
                 !classpathSnapshotProperties.useClasspathSnapshot.get() -> ClasspathChanges.NotAvailable.ClasspathSnapshotIsDisabled
-                else -> when (changedFiles) {
-                    is ChangedFiles.Known -> getClasspathChanges()
-                    is ChangedFiles.Unknown -> ClasspathChanges.NotAvailable.ForNonIncrementalRun
-                    is ChangedFiles.Dependencies -> error("Unexpected type: ${changedFiles.javaClass.name}")
+                else -> {
+                    when (changedFiles) {
+                        is ChangedFiles.Known -> getClasspathChanges()
+                        is ChangedFiles.Unknown -> ClasspathChanges.NotAvailable.ForNonIncrementalRun
+                        is ChangedFiles.Dependencies -> error("Unexpected type: ${changedFiles.javaClass.name}")
+                    }
+
                 }
             }
             logger.info(USING_JVM_INCREMENTAL_COMPILATION_MESSAGE)
@@ -686,9 +699,22 @@ abstract class KotlinCompile @Inject constructor(
             )
         } else null
 
+        with(classpathSnapshotProperties) {
+            if (isIncrementalCompilationEnabled() && useClasspathSnapshot.get()) {
+                copyClasspathSnapshotFilesToDir(
+                    classpathSnapshot.files.toList(),
+                    classpathSnapshotDir.get().asFile
+                )
+            }
+        }
+
         val environment = GradleCompilerEnvironment(
             defaultCompilerClasspath, messageCollector, outputItemCollector,
-            outputFiles = allOutputFiles(),
+            outputFiles = if (classpathSnapshotProperties.useClasspathSnapshot.get()) {
+                allOutputFiles().minus(classpathSnapshotProperties.classpathSnapshotDirFileCollection)
+            } else {
+                allOutputFiles()
+            },
             reportingSettings = reportingSettings,
             incrementalCompilationEnvironment = icEnv,
             kotlinScriptExtensions = sourceFilesExtensions.get().toTypedArray()
@@ -702,12 +728,6 @@ abstract class KotlinCompile @Inject constructor(
             environment,
             defaultKotlinJavaToolchain.get().providedJvm.get().javaHome
         )
-
-        with(classpathSnapshotProperties) {
-            if (isIncrementalCompilationEnabled() && useClasspathSnapshot.get()) {
-                copyClasspathSnapshotFilesToDir(classpathSnapshot.files.toList(), classpathSnapshotDir.get().asFile)
-            }
-        }
     }
 
     private fun validateKotlinAndJavaHasSameTargetCompatibility(args: K2JVMCompilerArguments) {
@@ -782,6 +802,13 @@ abstract class KotlinCompile @Inject constructor(
         val previousSnapshot = ClasspathSnapshotSerializer.load(previousSnapshotFiles)
 
         return ClasspathChangesComputer.getChanges(currentSnapshot, previousSnapshot)
+    }
+
+    private fun storeClasspathSnapshot() {
+        copyClasspathSnapshotFilesToDir(
+            classpathSnapshotProperties.classpathSnapshot.files.toList(),
+            classpathSnapshotProperties.classpathSnapshotDir.get().asFile
+        )
     }
 
     /**

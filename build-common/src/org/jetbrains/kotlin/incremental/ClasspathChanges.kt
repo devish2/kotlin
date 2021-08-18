@@ -18,7 +18,7 @@ sealed class ClasspathChanges : Serializable {
 
     class Available() : ClasspathChanges() {
 
-        lateinit var lookupSymbols: List<LookupSymbol>
+        lateinit var lookupSymbols: List<LookupSymbol> // TODO: List or Set?
             private set
 
         lateinit var fqNames: List<FqName>

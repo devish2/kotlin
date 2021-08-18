@@ -37,7 +37,11 @@ class ClasspathEntrySnapshot(
 sealed class ClassSnapshot
 
 /** [ClassSnapshot] of a Kotlin class. */
-class KotlinClassSnapshot(val classInfo: KotlinClassInfo) : ClassSnapshot()
+class KotlinClassSnapshot(val classInfo: KotlinClassInfo) : ClassSnapshot() {
+    override fun toString(): String {
+        return classInfo.classId.toString()
+    }
+}
 
 /** [ClassSnapshot] of a Java class. */
 sealed class JavaClassSnapshot : ClassSnapshot()
@@ -45,7 +49,11 @@ sealed class JavaClassSnapshot : ClassSnapshot()
 /** [JavaClassSnapshot] of a typical Java class. */
 class RegularJavaClassSnapshot(
     val serializedJavaClass: SerializedJavaClass
-) : JavaClassSnapshot()
+) : JavaClassSnapshot() {
+    override fun toString(): String {
+        return serializedJavaClass.classId.toString()
+    }
+}
 
 /**
  * [JavaClassSnapshot] of a Java class where there is nothing to capture.

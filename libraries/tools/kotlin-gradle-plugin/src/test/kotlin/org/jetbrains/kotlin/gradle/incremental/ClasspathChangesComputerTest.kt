@@ -5,13 +5,15 @@
 
 package org.jetbrains.kotlin.gradle.incremental
 
-import org.jetbrains.kotlin.incremental.DirtyData
+import org.jetbrains.kotlin.incremental.ClasspathChanges
 import org.jetbrains.kotlin.incremental.LookupSymbol
 import org.jetbrains.kotlin.name.FqName
 import org.jetbrains.kotlin.resolve.sam.SAM_LOOKUP_NAME
 import org.junit.Assert.assertEquals
 import org.junit.Before
 import org.junit.Test
+import java.io.File
+import java.util.zip.ZipFile
 
 abstract class ClasspathChangesComputerTest : ClasspathSnapshotTestCommon() {
 
@@ -33,29 +35,75 @@ abstract class ClasspathChangesComputerTest : ClasspathSnapshotTestCommon() {
     @Test
     fun testCollectClassChanges_changedPublicMethodSignature() {
         val updatedSnapshot = testSourceFile.changePublicMethodSignature().compileAndSnapshot()
-        val dirtyData = ClasspathChangesComputer.computeClassChanges(updatedSnapshot, originalSnapshot)
+        val classpathChanges = computeClassChanges(updatedSnapshot, originalSnapshot)
 
         val testClass = testSourceFile.sourceFile.unixStyleRelativePath.substringBeforeLast('.').replace('/', '.')
         assertEquals(
-            DirtyData(
-                dirtyLookupSymbols = setOf(
+            Changes(
+                lookupSymbols = listOf(
                     LookupSymbol(name = SAM_LOOKUP_NAME.asString(), scope = testClass),
-                    LookupSymbol(name = "publicMethod", scope = testClass),
-                    LookupSymbol(name = "changedPublicMethod", scope = testClass)
+                    LookupSymbol(name = "changedPublicMethod", scope = testClass),
+                    LookupSymbol(name = "publicMethod", scope = testClass)
                 ),
-                dirtyClassesFqNames = setOf(FqName(testClass)),
-                dirtyClassesFqNamesForceRecompile = emptySet()
+                fqNames = listOf(FqName(testClass)),
             ),
-            dirtyData
+            classpathChanges
         )
     }
 
     @Test
     fun testCollectClassChanges_changedMethodImplementation() {
         val updatedSnapshot = testSourceFile.changeMethodImplementation().compileAndSnapshot()
-        val dirtyData = ClasspathChangesComputer.computeClassChanges(updatedSnapshot, originalSnapshot)
+        val classpathChanges = computeClassChanges(updatedSnapshot, originalSnapshot)
 
-        assertEquals(DirtyData(emptySet(), emptySet(), emptySet()), dirtyData)
+        assertEquals(Changes(emptyList(), emptyList()), classpathChanges)
+    }
+
+    private data class Changes(val lookupSymbols: List<LookupSymbol>, val fqNames: List<FqName>)
+
+    private fun computeClassChanges(current: ClassSnapshot, previous: ClassSnapshot): Changes {
+        val currentClasspathSnapshot =
+            ClasspathSnapshot(listOf(ClasspathEntrySnapshot(LinkedHashMap<String, ClassSnapshot>(1).also { it["a"] = current })))
+        val previousClasspathSnapshot =
+            ClasspathSnapshot(listOf(ClasspathEntrySnapshot(LinkedHashMap<String, ClassSnapshot>(1).also { it["a"] = previous })))
+        val classpathChanges = ClasspathChangesComputer.getChanges(currentClasspathSnapshot, previousClasspathSnapshot) as ClasspathChanges.Available
+        return Changes(classpathChanges.lookupSymbols, classpathChanges.fqNames)
+    }
+
+    @Test
+    fun testA() {
+        val sdkDir = "/usr/local/google/home/hungnv/Setup/Android/Sdk"
+        val coreLambda = File("$sdkDir/build-tools/30.0.3/core-lambda-stubs.jar")
+        val a = ZipFile(coreLambda).use {
+            return@use listOf(
+                it.getInputStream(it.getEntry("java/lang/invoke/MethodHandles.class")).readBytes(),
+                it.getInputStream(it.getEntry("java/lang/invoke/MethodHandles\$Lookup.class")).readBytes(),
+            )
+        }
+        val androidJar = File("$sdkDir/platforms/android-30/android.jar")
+        val b = ZipFile(androidJar).use {
+            return@use listOf(
+                it.getInputStream(it.getEntry("java/lang/invoke/MethodHandles.class")).readBytes(),
+                it.getInputStream(it.getEntry("java/lang/invoke/MethodHandles\$Lookup.class")).readBytes(),
+            )
+        }
+
+        val aSnap = ClassSnapshotter.snapshot(
+            listOf(
+                ClassFileWithContents(ClassFile(coreLambda, "java/lang/invoke/MethodHandles.class"), a.get(0)),
+                ClassFileWithContents(ClassFile(coreLambda, "java/lang/invoke/MethodHandles\$Lookup.class"), a.get(1)),
+            )
+        )
+        val bSnap = ClassSnapshotter.snapshot(
+            listOf(
+                ClassFileWithContents(ClassFile(androidJar, "java/lang/invoke/MethodHandles.class"), b.get(0)),
+                ClassFileWithContents(ClassFile(androidJar, "java/lang/invoke/MethodHandles\$Lookup.class"), b.get(1)),
+            )
+        )
+
+        aSnap.forEachIndexed { index, classSnapshot ->
+            println(computeClassChanges(classSnapshot, bSnap.get(index)))
+        }
     }
 }
 
@@ -66,3 +114,5 @@ class KotlinClassesClasspathChangesComputerTest : ClasspathChangesComputerTest()
 class JavaClassesClasspathChangesComputerTest : ClasspathChangesComputerTest() {
     override val testSourceFile = SimpleJavaClass(tmpDir)
 }
+
+

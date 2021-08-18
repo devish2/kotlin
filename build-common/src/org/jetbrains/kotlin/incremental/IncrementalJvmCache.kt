@@ -200,7 +200,7 @@ open class IncrementalJvmCache(
 
     fun saveJavaClassProto(source: File?, serializedJavaClass: SerializedJavaClass, collector: ChangesCollector) {
         val jvmClassName = JvmClassName.byClassId(serializedJavaClass.classId)
-        javaSourcesProtoMap.process(jvmClassName, serializedJavaClass, collector)
+        javaSourcesProtoMap.process(jvmClassName, serializedJavaClass, collector) // NoClassFound
         source?.let { sourceToClassesMap.add(source, jvmClassName) }
         val (proto, nameResolver) = serializedJavaClass.toProtoData()
         addToClassStorage(proto, nameResolver, source)
