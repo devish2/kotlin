@@ -45,6 +45,13 @@ private inline fun isInsideSpecificClass(
             context.containingDeclarations.asReversed().any { it is FirRegularClass && predicate.invoke(it) }
 }
 
+internal fun FirMemberDeclaration.isEffectivelyFinal(context: CheckerContext, treatEnumAsFinal: Boolean = true): Boolean {
+    if (this.isFinal) return true
+    val containingClass = context.containingDeclarations.lastOrNull() as? FirRegularClass ?: return true
+    if (containingClass.isEnumClass) return treatEnumAsFinal
+    return containingClass.isFinal
+}
+
 internal fun FirMemberDeclaration.isEffectivelyExpect(
     containingClass: FirClass?,
     context: CheckerContext,

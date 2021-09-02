@@ -1,0 +1,3 @@
+package
+
+public tailrec fun foo(): kotlin.Unit

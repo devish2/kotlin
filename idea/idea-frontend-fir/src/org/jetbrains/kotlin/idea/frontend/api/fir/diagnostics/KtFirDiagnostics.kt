@@ -52,6 +52,7 @@ import org.jetbrains.kotlin.psi.KtImportDirective
 import org.jetbrains.kotlin.psi.KtModifierListOwner
 import org.jetbrains.kotlin.psi.KtNameReferenceExpression
 import org.jetbrains.kotlin.psi.KtNamedDeclaration
+import org.jetbrains.kotlin.psi.KtNamedFunction
 import org.jetbrains.kotlin.psi.KtObjectDeclaration
 import org.jetbrains.kotlin.psi.KtParameter
 import org.jetbrains.kotlin.psi.KtPrimaryConstructor
@@ -1519,6 +1520,22 @@ sealed class KtFirDiagnostic<PSI : PsiElement> : KtDiagnosticWithPsi<PSI> {
 
     abstract class CannotInferParameterType : KtFirDiagnostic<KtElement>() {
         override val diagnosticClass get() = CannotInferParameterType::class
+    }
+
+    abstract class NoTailCallsFound : KtFirDiagnostic<KtNamedFunction>() {
+        override val diagnosticClass get() = NoTailCallsFound::class
+    }
+
+    abstract class TailrecOnVirtualMember : KtFirDiagnostic<KtNamedFunction>() {
+        override val diagnosticClass get() = TailrecOnVirtualMember::class
+    }
+
+    abstract class NonTailRecursiveCall : KtFirDiagnostic<PsiElement>() {
+        override val diagnosticClass get() = NonTailRecursiveCall::class
+    }
+
+    abstract class TailRecursionInTryIsNotSupported : KtFirDiagnostic<PsiElement>() {
+        override val diagnosticClass get() = TailRecursionInTryIsNotSupported::class
     }
 
     abstract class FunInterfaceConstructorReference : KtFirDiagnostic<KtExpression>() {
